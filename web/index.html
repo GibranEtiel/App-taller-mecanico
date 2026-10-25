@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>El Garage de Einstein</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="marca">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+      </div>
+      <div><strong id="nombreTaller">El Garage de Einstein</strong><small>Gestión del taller</small></div>
+    </div>
+    <nav class="nav">
+      <button data-act="ir" data-v="autos">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17v-4l2-5.5A2 2 0 0 1 6.9 6h10.2a2 2 0 0 1 1.9 1.5L21 13v4"/><path d="M3 17h18"/><circle cx="7.5" cy="17" r="1.8"/><circle cx="16.5" cy="17" r="1.8"/></svg>
+        <span>Autos</span>
+      </button>
+      <button data-act="ir" data-v="presupuestos">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8M8 9h2"/></svg>
+        <span>Presupuestos</span>
+      </button>
+      <button data-act="ir" data-v="ventas">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+        <span>Ventas</span>
+      </button>
+      <button data-act="ir" data-v="taller">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V8l7-5 7 5v13"/><path d="M10 21v-6h4v6"/></svg>
+        <span>Datos del taller</span>
+      </button>
+    </nav>
+    <div class="side-pie" id="sidePie"></div>
+    <div class="credito">Desarrollado por <b>@gibran etiel</b></div>
+  </aside>
+  <main id="main" class="main"></main>
+</div>
+
+<div id="modal" class="overlay" hidden><div class="sheet"></div></div>
+<div id="dialog" class="overlay alto" hidden><div class="dlg"></div></div>
+<div id="toast" hidden></div>
+<div id="printArea"></div>
+<input type="file" id="fileIn" accept=".json,application/json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
