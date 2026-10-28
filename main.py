@@ -1,137 +1,194 @@
-"""El Garage de Einstein - aplicación de escritorio para el taller.
+"""El Garage de Einstein: ventana (pywebview) + guardado de datos en archivos.
 
-Abre una ventana con la interfaz (carpeta web/) y guarda los datos en
-Documentos\\Garage de Einstein - Datos\\datos.json, con copia diaria automática.
+La interfaz vive en la carpeta web (index.html, style.css, app.js).
+Los datos se guardan en  Documentos/Garage de Einstein - Datos/datos.json
 """
-import ctypes
-import datetime
 import json
 import os
 import shutil
 import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import webview
 
-TITULO = "El Garage de Einstein"
-BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+NOMBRE = "El Garage de Einstein"
+CARPETA_DATOS = "Garage de Einstein - Datos"
+MAX_RESPALDOS = 30
 
 
-def _documentos() -> Path:
+def recurso(*partes):
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*partes)
+
+
+def carpeta_datos():
+    docs = Path.home() / "Documents"
+    if not docs.exists():
+        docs = Path.home()
+    d = docs / CARPETA_DATOS
+    (d / "respaldos").mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _cuenta(texto):
+    """Cantidad de autos + presupuestos de un JSON (para no pisar datos con una base vacía)."""
     try:
-        buf = ctypes.create_unicode_buffer(260)
-        # 5 = CSIDL_PERSONAL (carpeta Documentos, incluso si está en OneDrive)
-        if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value:
-            return Path(buf.value)
+        d = json.loads(texto)
+        return len(d.get("autos", [])) + len(d.get("presupuestos", []))
     except Exception:
-        pass
-    return Path.home() / "Documents"
+        return 0
 
 
-CARPETA = _documentos() / "Garage de Einstein - Datos"
-ARCHIVO = CARPETA / "datos.json"
-RESPALDOS = CARPETA / "respaldos"
-
-
-def _respaldo_diario() -> None:
-    """Copia datos.json a respaldos/ una vez por día. Nunca se borra ninguna copia."""
-    if not ARCHIVO.exists():
-        return
-    RESPALDOS.mkdir(parents=True, exist_ok=True)
-    destino = RESPALDOS / f"datos-{datetime.date.today().isoformat()}.json"
-    if not destino.exists():
-        shutil.copy2(ARCHIVO, destino)
-
-
-def _ruta_dialogo(resultado):
-    if not resultado:
-        return None
-    return resultado if isinstance(resultado, str) else resultado[0]
+def _escribir_atomico(ruta, texto):
+    """Escribe en un archivo temporal, lo fuerza a disco y recién ahí reemplaza el original."""
+    tmp = ruta.with_suffix(ruta.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(texto)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, ruta)
 
 
 class Api:
-    """Métodos que la interfaz llama con window.pywebview.api.*"""
+    def __init__(self):
+        self._dir = carpeta_datos()
+        self._archivo = self._dir / "datos.json"
+        self._anterior = self._dir / "datos.anterior.json"
+        self._respaldos = self._dir / "respaldos"
+        self._ventana = None
 
+    # ---------- datos ----------
     def cargar(self):
-        if ARCHIVO.exists():
-            return ARCHIVO.read_text(encoding="utf-8")
-        return None
-
-    def ultimo_respaldo(self):
-        """Contenido de la copia más reciente (para recuperarse si datos.json se dañó)."""
-        copias = sorted(RESPALDOS.glob("*.json")) if RESPALDOS.exists() else []
-        previo = CARPETA / "datos.anterior.json"
-        if previo.exists():
-            return previo.read_text(encoding="utf-8")
-        return copias[-1].read_text(encoding="utf-8") if copias else None
+        """Devuelve el texto del archivo, o '' si todavía no existe (primer uso).
+        Si no se puede leer, lanza error: la interfaz NO debe arrancar vacía."""
+        if not self._archivo.exists():
+            return ""
+        with open(self._archivo, "r", encoding="utf-8-sig") as f:
+            return f.read()
 
     def guardar(self, texto):
         try:
-            CARPETA.mkdir(parents=True, exist_ok=True)
-            json.loads(texto)  # nunca escribir algo que no sea JSON válido
-            if ARCHIVO.exists():  # deja la versión anterior como red de seguridad
-                shutil.copy2(ARCHIVO, CARPETA / "datos.anterior.json")
-            temporal = ARCHIVO.with_suffix(".tmp")
-            temporal.write_text(texto, encoding="utf-8")
-            os.replace(temporal, ARCHIVO)
+            json.loads(texto)  # nunca guardar algo que no sea JSON válido
+            previo = None
+            if self._archivo.exists():
+                with open(self._archivo, "r", encoding="utf-8-sig") as f:
+                    previo = f.read()
+            if previo is not None:
+                # Si la base nueva viene vacía pero la que hay no lo está, se conserva una copia aparte.
+                if _cuenta(previo) > 0 and _cuenta(texto) == 0:
+                    self._copiar_texto(previo, "antes-de-vaciar")
+                if previo != texto:
+                    _escribir_atomico(self._anterior, previo)
+                # Copia del día: el estado con que empezó el día.
+                hoy = self._respaldos / f"datos-{datetime.now():%Y-%m-%d}.json"
+                if not hoy.exists():
+                    _escribir_atomico(hoy, previo)
+                    self._podar()
+            _escribir_atomico(self._archivo, texto)
             return {"ok": True}
-        except Exception as error:  # noqa: BLE001
-            return {"ok": False, "error": str(error)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
 
-    def ruta(self):
-        return str(CARPETA)
+    def _copiar_texto(self, texto, prefijo):
+        _escribir_atomico(self._respaldos / f"{prefijo}-{datetime.now():%Y-%m-%d_%H%M%S}.json", texto)
 
-    def abrir_carpeta(self):
-        CARPETA.mkdir(parents=True, exist_ok=True)
-        os.startfile(CARPETA)  # type: ignore[attr-defined]
+    def _podar(self):
+        diarios = sorted(self._respaldos.glob("datos-*.json"))
+        for viejo in diarios[:-MAX_RESPALDOS]:
+            try:
+                viejo.unlink()
+            except OSError:
+                pass
 
-    def exportar(self, texto):
-        ventana = webview.windows[0]
-        nombre = f"respaldo-garage-{datetime.date.today().isoformat()}.json"
-        dialogo = getattr(getattr(webview, "FileDialog", None), "SAVE", None) or webview.SAVE_DIALOG
-        ruta = _ruta_dialogo(ventana.create_file_dialog(
-            dialogo, directory=str(_documentos()), save_filename=nombre,
-            file_types=("Copia de seguridad (*.json)",)))
-        if not ruta:
-            return None
-        Path(ruta).write_text(texto, encoding="utf-8")
-        return ruta
-
-    def importar(self):
-        ventana = webview.windows[0]
-        dialogo = getattr(getattr(webview, "FileDialog", None), "OPEN", None) or webview.OPEN_DIALOG
-        ruta = _ruta_dialogo(ventana.create_file_dialog(
-            dialogo, directory=str(_documentos()),
-            file_types=("Copia de seguridad (*.json)",)))
-        if not ruta:
-            return None
-        return Path(ruta).read_text(encoding="utf-8")
+    def ultimo_respaldo(self):
+        candidatos = []
+        for p in [self._anterior, *self._respaldos.glob("*.json")]:
+            if p.exists():
+                candidatos.append((p.stat().st_mtime, p))
+        for _, p in sorted(candidatos, reverse=True):
+            try:
+                with open(p, "r", encoding="utf-8-sig") as f:
+                    t = f.read()
+                json.loads(t)
+                return t
+            except Exception:  # noqa: BLE001
+                continue
+        return None
 
     def respaldo_previo(self):
-        """Guarda el estado actual antes de restaurar una copia."""
-        if ARCHIVO.exists():
-            RESPALDOS.mkdir(parents=True, exist_ok=True)
-            marca = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            shutil.copy2(ARCHIVO, RESPALDOS / f"antes-de-restaurar-{marca}.json")
+        if self._archivo.exists():
+            with open(self._archivo, "r", encoding="utf-8-sig") as f:
+                self._copiar_texto(f.read(), "antes-de-restaurar")
         return True
+
+    def ruta(self):
+        return str(self._dir)
+
+    def abrir_carpeta(self):
+        os.startfile(str(self._dir))
+
+    def exportar(self, texto):
+        dlg = getattr(webview, "FileDialog", None)
+        tipo = dlg.SAVE if dlg else webview.SAVE_DIALOG
+        r = self._ventana.create_file_dialog(
+            tipo, directory=str(Path.home() / "Documents"),
+            save_filename=f"respaldo-garage-{datetime.now():%Y-%m-%d}.json",
+            file_types=("Copia de seguridad (*.json)",))
+        if not r:
+            return None
+        destino = r if isinstance(r, str) else r[0]
+        _escribir_atomico(Path(destino), texto)
+        return str(destino)
+
+    def importar(self):
+        dlg = getattr(webview, "FileDialog", None)
+        tipo = dlg.OPEN if dlg else webview.OPEN_DIALOG
+        r = self._ventana.create_file_dialog(
+            tipo, directory=str(Path.home() / "Documents"), allow_multiple=False,
+            file_types=("Copia de seguridad (*.json)",))
+        if not r:
+            return None
+        with open(r[0], "r", encoding="utf-8-sig") as f:
+            return f.read()
+
+    # ---------- consulta de patente (Boostr.cl) ----------
+    def consultar_patente(self, patente, clave):
+        """Busca marca, modelo y año de una patente chilena. Nunca lanza error: devuelve {ok, ...}."""
+        patente = "".join(c for c in str(patente).upper() if c.isalnum())
+        clave = (clave or "").strip()
+        if not clave:
+            return {"ok": False, "motivo": "sin_clave"}
+        req = urllib.request.Request(
+            f"https://api.boostr.cl/vehicle/{patente}.json",
+            headers={"X-API-KEY": clave, "accept": "application/json", "User-Agent": "GarageEinstein/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                cuerpo = json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            motivo = {401: "clave", 403: "clave", 404: "no_encontrada", 429: "limite"}.get(e.code, "error")
+            return {"ok": False, "motivo": motivo, "detalle": f"HTTP {e.code}"}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "motivo": "red", "detalle": str(e)}
+        datos = cuerpo.get("data", cuerpo) if isinstance(cuerpo, dict) else {}
+        marca = str(datos.get("make") or datos.get("marca") or "").strip()
+        modelo = str(datos.get("model") or datos.get("modelo") or "").strip()
+        anio = str(datos.get("year") or datos.get("anio") or datos.get("año") or "").strip()
+        if not (marca or modelo or anio):
+            return {"ok": False, "motivo": "no_encontrada"}
+        return {"ok": True, "marca": marca, "modelo": modelo, "anio": anio}
 
 
 def main():
-    CARPETA.mkdir(parents=True, exist_ok=True)
-    try:
-        _respaldo_diario()
-    except Exception:
-        pass
-    webview.create_window(
-        TITULO,
-        url=str(BASE / "web" / "index.html"),
-        js_api=Api(),
-        width=1360,
-        height=840,
-        min_size=(1000, 640),
-        maximized=True,
-    )
-    webview.start()
+    api = Api()
+    ventana = webview.create_window(
+        NOMBRE, str(recurso("web", "index.html")), js_api=api,
+        width=1280, height=820, min_size=(980, 640))
+    api._ventana = ventana
+    webview.start(http_server=True)
 
 
 if __name__ == "__main__":

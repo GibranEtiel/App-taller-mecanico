@@ -21,6 +21,20 @@ DÓNDE QUEDAN LOS DATOS
   Cada día se hace una copia automática en la subcarpeta "respaldos" (guarda las últimas 30).
   En "Datos del taller" hay botones para guardar/restaurar una copia (pendrive, correo).
 
+GUARDADO SEGURO
+  Todo se guarda en cada cambio. Además, lo que vas escribiendo en un formulario (auto o presupuesto)
+  se guarda solo como borrador: si cierras el programa a medias, al abrir te pregunta si quieres seguir.
+  Si el programa no logra leer los datos al abrir, NO guarda nada (antes arrancaba vacío y pisaba el archivo).
+
+AUTOCOMPLETAR POR PATENTE
+  Al escribir la patente se rellenan marca, modelo y año (primero busca en lo ya ingresado; si no está,
+  consulta Boostr.cl). Necesita una clave gratis de api.boostr.cl/patente (5 consultas por día),
+  que se pega en «Datos del taller». Si no la encuentra o no hay internet, se escribe a mano.
+
+FINALIZAR UN AUTO
+  Al poner «Finalizado» se registra solo el pago de lo que faltaba (entra a Ventas con la fecha de hoy).
+  Si se vuelve a «Pendiente», ese pago automático se quita.
+
 PARA PASAR EL PROGRAMA A OTRO PC
   1) Copiar el archivo "El Garage de Einstein.exe" (pendrive o correo). No necesita instalar nada más
      (Windows 10/11 con Microsoft Edge WebView2, que ya viene en Windows 11).

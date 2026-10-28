@@ -309,3 +309,17 @@ table { width: 100%; border-collapse: collapse; }
   .kpis { grid-template-columns: 1fr 1fr; }
   .sh-body.cols { grid-template-columns: 1fr; }
 }
+
+/* ---- autocompletar con la patente ---- */
+.pat-linea { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.pat-estado { font-size: .92rem; color: var(--muted); line-height: 1.35; flex: 1 1 260px; }
+.pat-estado.ok { color: var(--fin); font-weight: 600; }
+.pat-estado.err { color: var(--danger); }
+.pat-estado.aviso { color: var(--pend); }
+.pat-estado.busca { color: var(--pres); }
+
+/* ---- primer paso de «Ingresar auto» ---- */
+.sh-body.paso { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; padding: 30px 26px 34px; }
+.sh-body.paso .patente-in { font-size: 2rem; text-align: center; padding: 14px; }
+.sh-body.paso p { text-align: center; line-height: 1.45; }
+.paso-acc { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }

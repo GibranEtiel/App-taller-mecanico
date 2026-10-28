@@ -42,6 +42,7 @@ const TALLER_DEF = {
   mecanico: '',
   email: '',
   validez: 15,
+  apiKey: '', // clave para autocompletar el auto por su patente (Boostr.cl)
   pie: 'Los valores pueden variar si al desarmar se detectan fallas adicionales. Se avisará antes de realizar cualquier trabajo extra.',
   // Texto del art. 42 de la Ley 19.496. Es editable en «Datos del taller» (conviene que lo revise un abogado).
   aviso42: 'AVISO LEGAL (art. 42, Ley N° 19.496): Se entenderán abandonadas en favor del proveedor las especies que le sean entregadas en reparación, cuando no sean retiradas en el plazo de un año contado desde la fecha en que se haya otorgado y suscrito el correspondiente documento de recepción del trabajo.'
@@ -54,16 +55,21 @@ const LS_KEY = 'garage-einstein-datos';
 let db, bloqueado = false, recuperado = false, migrado = false;
 const API = () => (window.pywebview && window.pywebview.api) || null;
 
+// La API de la ventana está lista solo cuando ya tiene sus funciones (el objeto puede existir antes, vacío).
+const apiLista = () => { const a = API(); return a && typeof a.cargar === 'function' && typeof a.guardar === 'function' ? a : null; };
+
 function esperarApi() {
-  return new Promise(res => {
-    if (API()) return res(API());
-    // Dentro de la app el objeto pywebview existe aunque la API tarde en cargar.
-    const enApp = !!window.pywebview || location.protocol === 'file:';
-    if (!enApp) return res(null);
-    let t = 0;
+  return new Promise((res, rej) => {
+    if (apiLista()) return res(apiLista());
+    let t = 0, enApp = !!window.pywebview || location.protocol === 'file:';
     const iv = setInterval(() => {
-      if (API()) { clearInterval(iv); res(API()); }
-      else if ((t += 100) > 20000) { clearInterval(iv); res(null); }
+      t += 100;
+      if (apiLista()) { clearInterval(iv); return res(apiLista()); }
+      if (window.pywebview) enApp = true;
+      // En un navegador común (sin la ventana del programa) se usa el almacenamiento del navegador.
+      if (!enApp && t >= 1500) { clearInterval(iv); return res(null); }
+      // Dentro del programa NUNCA se arranca vacío: si la API no responde, se avisa y no se guarda nada.
+      if (t >= 30000) { clearInterval(iv); rej(new Error('La API del programa no respondió')); }
     }, 100);
   });
 }
@@ -75,7 +81,8 @@ function normalizar(d) {
     taller: { ...TALLER_DEF, ...(d.taller || {}) },
     autos: Array.isArray(d.autos) ? d.autos : [],
     presupuestos: Array.isArray(d.presupuestos) ? d.presupuestos : [],
-    contador: Number(d.contador) > 0 ? Number(d.contador) : 1
+    contador: Number(d.contador) > 0 ? Number(d.contador) : 1,
+    borrador: d.borrador && d.borrador.draft ? d.borrador : null // formulario que quedó a medio llenar
   };
   out.autos.forEach(a => { a.pagos = Array.isArray(a.pagos) ? a.pagos : []; a.total = Number(a.total) || 0; });
   // Migración: los autos que estaban en estado «presupuesto» pasan a «pendiente» (no se borra nada).
@@ -104,9 +111,14 @@ function normalizar(d) {
 }
 
 async function cargar() {
-  let raw = null;
-  const api = await esperarApi();
-  try { raw = api ? await api.cargar() : localStorage.getItem(LS_KEY); } catch (e) { raw = null; }
+  let raw = null, api = null, leido = false;
+  try { api = await esperarApi(); } catch (e) { bloqueado = true; db = normalizar(null); return; }
+  // Un error al leer NO es lo mismo que «no hay datos todavía»: se reintenta y, si no se puede, se bloquea el guardado.
+  for (let i = 0; i < 5 && !leido; i++) {
+    try { raw = api ? await api.cargar() : localStorage.getItem(LS_KEY); leido = true; }
+    catch (e) { await new Promise(r => setTimeout(r, 600)); }
+  }
+  if (!leido) { bloqueado = true; db = normalizar(null); return; }
   let data = null;
   try { data = raw ? JSON.parse(raw) : null; } catch (e) {
     // El archivo existe pero está dañado: NO arrancar vacío (el próximo guardado lo pisaría).
@@ -119,7 +131,15 @@ async function cargar() {
   db = normalizar(data);
 }
 
-async function guardar() {
+// Los guardados se hacen de a uno, en orden; así el último que se escribe siempre tiene los datos más nuevos.
+let colaGuardado = Promise.resolve();
+function guardar() {
+  const p = colaGuardado.then(escribirDatos, escribirDatos);
+  colaGuardado = p.catch(() => {});
+  return p;
+}
+
+async function escribirDatos() {
   if (bloqueado) { toast('Los datos no se pudieron leer. Para no perder nada, no se está guardando.', true); return false; }
   const json = JSON.stringify(db);
   const api = API();
@@ -174,7 +194,7 @@ function toast(msg, error = false) {
   toastT = setTimeout(() => { t.hidden = true; }, error ? 5000 : 3200);
 }
 
-function confirmar({ titulo, texto, ok = 'Aceptar', cancelar = 'Cancelar', peligro = false }) {
+function confirmar({ titulo, texto, ok = 'Aceptar', cancelar = 'Cancelar', peligro = false, enfocarOk = false }) {
   return new Promise(res => {
     const d = $('#dialog');
     $('.dlg', d).innerHTML = `
@@ -186,7 +206,7 @@ function confirmar({ titulo, texto, ok = 'Aceptar', cancelar = 'Cancelar', pelig
     d.hidden = false;
     const fin = v => { d.hidden = true; d.onclick = null; res(v); };
     d.onclick = e => { const b = e.target.closest('[data-r]'); if (b) fin(b.dataset.r === '1'); };
-    $('[data-r="0"]', d).focus();
+    $(enfocarOk ? '[data-r="1"]' : '[data-r="0"]', d).focus();
   });
 }
 
@@ -204,6 +224,17 @@ function mostrarModal(html, conservarScroll = false) {
   sh.scrollTop = sc;
 }
 
+/* ---- borrador: lo que se va escribiendo en un formulario se guarda solo, para no perderlo si se cierra el programa ---- */
+let borradorT;
+function programarBorrador() {
+  clearTimeout(borradorT);
+  borradorT = setTimeout(async () => {
+    if (!ctx || !ctx.dirty || bloqueado) return;
+    db.borrador = { tipo: ctx.tipo, origen: ctx.origen || null, draft: clone(ctx.draft) };
+    await guardar();
+  }, 400);
+}
+
 async function cerrarModal(forzar = false) {
   if (!forzar && ctx && ctx.dirty) {
     const ok = await confirmar({
@@ -213,6 +244,8 @@ async function cerrarModal(forzar = false) {
     });
     if (!ok) return;
   }
+  clearTimeout(borradorT);
+  if (db.borrador) { db.borrador = null; guardar(); }
   ctx = null;
   $('#modal').hidden = true;
   $('#modal .sheet').scrollTop = 0;
@@ -229,9 +262,136 @@ function formatearDinero(el) {
 }
 
 /* =====================================================================
+   Autocompletar el auto con la patente (marca, modelo y año)
+   Si no se encuentra, o no hay internet, los datos se escriben a mano.
+   ===================================================================== */
+let patT, patSeq = 0, patUltima = '';
+const sinTildes = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const tituloCase = s => String(s || '').toLowerCase().replace(/(^|[\s-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+
+function marcaBonita(m) {
+  const k = sinTildes(m);
+  return MARCAS.find(x => sinTildes(x) === k) || tituloCase(m);
+}
+const modeloBonito = m => (/\d/.test(m) ? String(m).toUpperCase() : tituloCase(m));
+
+function patLinea() {
+  const e = ui.patEstado;
+  return `<div class="pat-linea"><button type="button" class="btn small" data-act="buscarPatente">🔎 Buscar datos del auto</button><span id="patEstado" class="pat-estado ${e ? e.cls : ''}">${e ? esc(e.txt) : 'Al escribir la patente se rellenan marca, modelo y año. Si no aparecen, escríbelos tú.'}</span></div>`;
+}
+function estadoPat(txt, cls = '') {
+  ui.patEstado = txt ? { txt, cls } : null;
+  const el = $('#patEstado');
+  if (el) { el.textContent = txt || 'Al escribir la patente se rellenan marca, modelo y año. Si no aparecen, escríbelos tú.'; el.className = 'pat-estado ' + (txt ? cls : ''); }
+}
+function reiniciarPatente() { clearTimeout(patT); patSeq++; patUltima = ''; ui.patEstado = null; }
+
+function datosLocalPatente(pat) {
+  const yo = ctx && ctx.draft.id;
+  const fuentes = [...db.autos, ...db.presupuestos].filter(x => x.id !== yo && (x.patente || '').toUpperCase() === pat && (x.marca || '').trim());
+  return fuentes.length ? fuentes[fuentes.length - 1] : null;
+}
+
+async function consultarPatente(pat, clave) {
+  const api = API();
+  if (api && typeof api.consultar_patente === 'function') return api.consultar_patente(pat, clave);
+  try { // en un navegador común (solo para probar)
+    const r = await fetch(`https://api.boostr.cl/vehicle/${pat}.json`, { headers: { 'X-API-KEY': clave, accept: 'application/json' } });
+    if (!r.ok) return { ok: false, motivo: { 401: 'clave', 403: 'clave', 404: 'no_encontrada', 429: 'limite' }[r.status] || 'error' };
+    const j = await r.json(), d = j.data || j;
+    return d.make || d.model || d.year ? { ok: true, marca: d.make || '', modelo: d.model || '', anio: String(d.year || '') } : { ok: false, motivo: 'no_encontrada' };
+  } catch (e) { return { ok: false, motivo: 'red' }; }
+}
+
+function aplicarVehiculo(v, sobrescribir) {
+  const d = ctx.draft;
+  const poner = (campo, valor) => {
+    if (!valor) return;
+    if (!sobrescribir && d[campo] && !ctx.autoFill) return; // lo que escribió la persona no se pisa
+    d[campo] = valor;
+    const el = $(`[data-f="${campo}"]`);
+    if (el) el.value = valor;
+  };
+  poner('marca', v.marca); poner('modelo', v.modelo);
+  poner('anio', /^\d{4}$/.test(String(v.anio || '').trim()) ? String(v.anio).trim() : '');
+  ctx.autoFill = true;
+  ctx.dirty = true;
+  programarBorrador();
+}
+
+async function buscarPatente(forzar = false) {
+  if (!ctx || (ctx.tipo !== 'auto' && ctx.tipo !== 'pres')) return;
+  const pat = (ctx.draft.patente || '').trim().toUpperCase();
+  if (pat.length < 5) { if (forzar) { estadoPat('Escribe la patente completa para buscarla', 'err'); $('[data-f="patente"]')?.focus(); } return; }
+  if (!forzar && pat === patUltima) return;
+  patUltima = pat;
+  const mi = ++patSeq;
+  if (!datosLocalPatente(pat) && (db.taller.apiKey || '').trim()) estadoPat('Buscando la patente…', 'busca');
+  const r = await resolverPatente(pat);
+  if (mi !== patSeq || !ctx || (ctx.draft.patente || '').trim().toUpperCase() !== pat) return; // cambió la patente mientras se buscaba
+  if (r.datos) aplicarVehiculo(r.datos, forzar); else patUltima = ''; // sin datos: permite volver a intentar
+  estadoPat(r.txt, r.cls);
+}
+
+// Busca marca, modelo y año de una patente: primero en lo ya ingresado, luego en internet. Nunca lanza error.
+async function resolverPatente(pat) {
+  const local = datosLocalPatente(pat);
+  if (local) return { datos: { marca: local.marca, modelo: local.modelo, anio: local.anio }, txt: '✓ Datos tomados de un ingreso anterior de esta patente', cls: 'ok' };
+  const clave = (db.taller.apiKey || '').trim();
+  if (!clave) return { datos: null, txt: 'Esta patente no está en el sistema y la búsqueda en internet no está activada. Escribe marca, modelo y año a mano.', cls: 'aviso' };
+  const r = await consultarPatente(pat, clave).catch(() => ({ ok: false, motivo: 'error' }));
+  if (r && r.ok) return { datos: { marca: marcaBonita(r.marca), modelo: modeloBonito(r.modelo), anio: r.anio }, txt: '✓ Datos encontrados. Revísalos y corrige lo que haga falta.', cls: 'ok' };
+  const txt = {
+    clave: 'La clave de patentes no es válida o está bloqueada (revísala en «Datos del taller»). Escribe los datos a mano.',
+    limite: 'Ya no quedan consultas por hoy. Escribe los datos a mano.',
+    no_encontrada: 'No se encontró esa patente en el sistema. Escribe marca, modelo y año a mano.',
+    red: 'No hay internet para buscar la patente. Escribe los datos a mano.'
+  }[r && r.motivo] || 'No se pudo consultar la patente. Escribe los datos a mano.';
+  return { datos: null, txt, cls: 'err' };
+}
+
+/* ---- «Ingresar auto»: primero se pide la patente; si se encuentra, el formulario sale ya relleno; si no, sale vacío para llenarlo a mano ---- */
+function pasoPatente() {
+  reiniciarPatente();
+  ctx = { tipo: 'paso', draft: { patente: '' }, dirty: false, buscando: false };
+  mostrarModal(`
+    <div class="sh-head"><h2>Ingresar auto</h2><button class="x" data-act="cerrarModal" aria-label="Cerrar">✕</button></div>
+    <div class="sh-body paso">
+      <div class="campo"><label for="f-pat0">Escribe la patente del auto</label><input id="f-pat0" class="patente-in" data-f="patente" maxlength="8" autocomplete="off" placeholder="BBCL45"></div>
+      <p class="muted" id="pasoMsj">Si el auto ya estuvo antes o la patente se encuentra, el formulario sale con la marca, el modelo y el año puestos.</p>
+      <div class="paso-acc">
+        <button class="btn primary" data-act="pasoContinuar">Buscar y continuar</button>
+        <button class="btn" data-act="pasoManual">Escribir los datos a mano</button>
+      </div>
+    </div>`);
+  setTimeout(() => $('#f-pat0')?.focus(), 50);
+}
+
+async function pasoContinuar(manual = false) {
+  if (!ctx || ctx.tipo !== 'paso' || ctx.buscando) return;
+  const pat = (ctx.draft.patente || '').trim().toUpperCase();
+  if (!manual && pat.length < 5) { toast('Escribe la patente completa', true); $('#f-pat0')?.focus(); return; }
+  let r = { datos: null, txt: '', cls: '' };
+  if (!manual) {
+    ctx.buscando = true;
+    $('#pasoMsj').textContent = 'Buscando la patente…';
+    r = await resolverPatente(pat);
+    if (!ctx || ctx.tipo !== 'paso') return; // se cerró la ventana mientras se buscaba
+  }
+  abrirPres(null);
+  ctx.origen = 'autos';
+  ctx.draft.patente = pat;
+  if (r.datos) { Object.assign(ctx.draft, { marca: r.datos.marca || '', modelo: r.datos.modelo || '', anio: /^\d{4}$/.test(String(r.datos.anio || '').trim()) ? String(r.datos.anio).trim() : '' }); ctx.autoFill = true; }
+  patUltima = pat;
+  ui.patEstado = r.txt ? { txt: r.txt, cls: r.cls } : null;
+  pintarPres();
+  setTimeout(() => $(r.datos ? '[data-f="cliente"]' : (pat ? '[data-f="marca"]' : '[data-f="patente"]'))?.focus(), 50);
+}
+
+/* =====================================================================
    Vista: Autos
    ===================================================================== */
-const ui = { filtro: 'pendiente', buscar: '', pf: 'todos', bq: '', modo: 'semana', ref: new Date() };
+const ui ={ filtro: 'pendiente', buscar: '', pf: 'todos', bq: '', modo: 'semana', ref: new Date() };
 const PESTANAS_AUTOS = [['pendiente', 'En el taller'], ['finalizado', 'Finalizados'], ['retirados', 'Retirados']];
 
 // Cada auto aparece en una sola pestaña: pendiente → «En el taller», finalizado → «Finalizados», retirado → «Retirados».
@@ -333,6 +493,7 @@ function nuevoAutoVacio() {
 
 function abrirAuto(id) {
   const a = id ? db.autos.find(x => x.id === id) : null;
+  reiniciarPatente();
   ctx = { tipo: 'auto', draft: a ? clone(a) : nuevoAutoVacio(), dirty: false };
   pintarAuto();
   if (!a) setTimeout(() => $('[data-f="patente"]')?.focus(), 50);
@@ -359,6 +520,7 @@ function pintarAuto() {
         <h3>Datos del auto</h3>
         <div class="bloque stack">
           <div class="campo"><label for="f-pat">Patente *</label><input id="f-pat" class="patente-in" data-f="patente" value="${esc(a.patente)}" maxlength="8" autocomplete="off" placeholder="BBCL45"></div>
+          ${patLinea()}
           <div class="grid3">
             <div class="campo"><label for="f-mar">Marca *</label><input id="f-mar" data-f="marca" list="marcas" value="${esc(a.marca)}" placeholder="Toyota" autocomplete="off"></div>
             <div class="campo"><label for="f-mod">Modelo</label><input id="f-mod" data-f="modelo" value="${esc(a.modelo)}" placeholder="Yaris"></div>
@@ -437,6 +599,7 @@ async function guardarAuto(opciones = {}) {
   if (opciones.reingresar) { a.retirado = false; a.retiradoEl = null; }
   if (a.id) db.autos[db.autos.findIndex(x => x.id === a.id)] = a;
   else { a.id = uid(); db.autos.push(a); }
+  clearTimeout(borradorT); db.borrador = null;
   if (!(await guardar())) return false;
   ctx.dirty = false;
   return true;
@@ -495,6 +658,7 @@ function nuevoPresVacio() {
 
 function abrirPres(id) {
   const p = id ? db.presupuestos.find(x => x.id === id) : null;
+  reiniciarPatente();
   ctx = { tipo: 'pres', draft: p ? clone(p) : nuevoPresVacio(), dirty: false };
   pintarPres();
 }
@@ -529,6 +693,7 @@ function pintarPres() {
           <div class="campo"><label for="p-mod">Modelo</label><input id="p-mod" data-f="modelo" value="${esc(p.modelo)}"></div>
           <div class="campo"><label for="p-ani">Año</label><input id="p-ani" class="n" data-f="anio" inputmode="numeric" maxlength="4" value="${esc(p.anio)}"></div>
         </div>
+        ${patLinea()}
       </div>
 
       <div class="bloque">
@@ -587,6 +752,7 @@ async function guardarPres() {
   // Si el presupuesto está ligado a un auto, el total del auto se mantiene al día.
   const a = p.autoId && db.autos.find(x => x.id === p.autoId);
   if (a) { a.total = totalPres(p).total; a.presupuestoId = p.id; }
+  clearTimeout(borradorT); db.borrador = null;
   if (!(await guardar())) return false;
   ctx.dirty = false;
   return true;
@@ -840,6 +1006,8 @@ function vistaTaller() {
         <div class="campo"><label for="t-val">Presupuestos válidos por (días)</label><input id="t-val" class="n" inputmode="numeric" value="${esc(t.validez)}"></div>
       </div>
       <div class="campo"><label for="t-pie">Texto al pie de los presupuestos</label><textarea id="t-pie">${esc(t.pie)}</textarea></div>
+      <div class="campo"><label for="t-api">Clave para rellenar el auto con la patente (Boostr.cl)</label><input id="t-api" value="${esc(t.apiKey)}" placeholder="Pega aquí la clave" autocomplete="off" spellcheck="false">
+        <small class="muted">Opcional. La clave gratis se pide en <b>api.boostr.cl/patente</b> (5 consultas por día, el primer mes; después hay planes de pago). Sin clave igual se rellenan los autos que ya ingresaste; los demás se escriben a mano.</small></div>
       ${FUNCIONES_LEGALES ? `<div class="campo"><label for="t-av">Aviso legal del artículo 42 (sale en la orden de recepción y en los presupuestos)</label><textarea id="t-av" style="min-height:120px">${esc(t.aviso42)}</textarea>
         <small class="muted">Conviene que un abogado revise este texto. Si lo dejas vacío, no se imprime.</small></div>` : ''}
       <div><button class="btn primary" data-act="guardarTaller">Guardar datos del taller</button></div>
@@ -873,11 +1041,27 @@ const ACT = {
 
   /* autos */
   // Todo auto entra por un presupuesto: «Ingresar auto» abre el formulario de presupuesto.
-  nuevoAuto: () => { abrirPres(null); ctx.origen = 'autos'; pintarPres(); setTimeout(() => $('[data-f="patente"]')?.focus(), 50); },
+  nuevoAuto: () => pasoPatente(),
+  pasoContinuar: () => pasoContinuar(),
+  pasoManual: () => pasoContinuar(true),
   abrirAuto: el => abrirAuto(el.dataset.id),
   filtro: el => { ui.filtro = el.dataset.v; pintarAutos(); },
   cerrarModal: () => cerrarModal(),
-  setEstado: el => { ctx.draft.estado = el.dataset.v; ctx.dirty = true; pintarAuto(); },
+  // Al finalizar, el saldo que faltaba se da por pagado (con la fecha de hoy, así entra a Ventas).
+  // Si se vuelve a «Pendiente», ese pago automático se quita.
+  setEstado: el => {
+    const a = ctx.draft, v = el.dataset.v;
+    if (a.estado === v) return;
+    a.estado = v;
+    if (v === 'finalizado') {
+      const sd = saldo(a);
+      if (sd > 0) { a.pagos.push({ id: uid(), fecha: hoy(), monto: sd, auto: true }); toast(`Finalizado: se registró el pago de ${clp(sd)} (el total) ✓`); }
+    } else {
+      a.pagos = a.pagos.filter(p => !p.auto);
+    }
+    ctx.dirty = true; pintarAuto();
+  },
+  buscarPatente: () => buscarPatente(true),
   addAbono: () => {
     const m = num($('#ab-monto').value), f = $('#ab-fecha').value || hoy();
     if (m <= 0) { toast('Escribe cuánto abonó', true); $('#ab-monto').focus(); return; }
@@ -992,7 +1176,7 @@ const ACT = {
     const g = id => $(id).value.trim();
     Object.assign(db.taller, {
       nombre: g('#t-nom') || TALLER_DEF.nombre, direccion: g('#t-dir'), telefono: g('#t-tel'), email: g('#t-mail'),
-      mecanico: g('#t-mec'), validez: num($('#t-val').value) || 15, pie: g('#t-pie'), ...($('#t-av') ? { aviso42: g('#t-av') } : {})
+      mecanico: g('#t-mec'), apiKey: g('#t-api'), validez: num($('#t-val').value) || 15, pie: g('#t-pie'), ...($('#t-av') ? { aviso42: g('#t-av') } : {})
     });
     if (await guardar()) { render(); toast('Datos del taller guardados ✓'); }
   },
@@ -1030,6 +1214,7 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el || !ACT[el.dataset.act]) return;
   ACT[el.dataset.act](el, e);
+  if (ctx && ctx.dirty) programarBorrador();
 });
 
 /* ---- escritura en formularios ---- */
@@ -1039,6 +1224,14 @@ document.addEventListener('input', e => {
   if (t.id === 'buscarPres') { ui.bq = t.value; refrescarListaPres(); return; }
   if (t.classList.contains('money')) formatearDinero(t);
   if (!ctx || !t.dataset.f) return;
+  if (ctx.tipo === 'paso') { // primer paso de «Ingresar auto»: solo la patente
+    const v = t.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (v !== t.value) t.value = v;
+    ctx.draft.patente = v;
+    clearTimeout(patT);
+    if (v.length === 6) patT = setTimeout(() => pasoContinuar(), 500);
+    return;
+  }
   const f = t.dataset.f;
   let v = t.type === 'checkbox' ? t.checked : t.value;
   if (t.classList.contains('money')) v = num(t.value);
@@ -1047,11 +1240,19 @@ document.addEventListener('input', e => {
   ctx.dirty = true;
   if (t.dataset.i !== undefined) ctx.draft.items[+t.dataset.i][f] = v;
   else ctx.draft[f] = v;
+  if (f === 'marca' || f === 'modelo' || f === 'anio') ctx.autoFill = false; // ya lo escribió la persona
+  if (f === 'patente' && (ctx.tipo === 'auto' || ctx.tipo === 'pres')) {
+    clearTimeout(patT); patSeq++;
+    if (v.length === 6) patT = setTimeout(() => buscarPatente(), 500);
+    else { patUltima = ''; estadoPat(''); }
+  }
+  programarBorrador();
   if (ctx.tipo === 'auto' && f === 'total') $('#resumen').innerHTML = htmlResumen(ctx.draft);
   if (ctx.tipo === 'pres' && (t.dataset.i !== undefined || f === 'iva')) pintarTotalesPres();
 });
 
 document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && ctx && ctx.tipo === 'paso' && e.target.id === 'f-pat0') { clearTimeout(patT); pasoContinuar(); return; }
   if (e.key !== 'Escape') return;
   if (!$('#dialog').hidden) { $('#dialog [data-r="0"]')?.click(); return; }
   if (!$('#modal').hidden) cerrarModal();
@@ -1081,12 +1282,26 @@ function render() {
   await cargar();
   render();
   if (bloqueado) {
-    await confirmar({ titulo: 'No se pudieron leer los datos', texto: 'El archivo de datos está dañado y no hay copia para recuperar. No se va a guardar nada para no pisarlo. Ve a «Datos del taller» → «Restaurar una copia», o avísale a quien te instaló el programa.', ok: 'Entendido', cancelar: 'Cerrar' });
+    await confirmar({ titulo: 'No se pudieron leer los datos', texto: 'No se pudo leer el archivo de datos. No se va a guardar nada para no pisarlo. Cierra el programa y vuelve a abrirlo; si sigue igual, ve a «Datos del taller» → «Restaurar una copia», o avísale a quien te instaló el programa.', ok: 'Entendido', cancelar: 'Cerrar' });
+    return;
   } else if (migrado && !recuperado) {
     await guardar();
   } else if (recuperado) {
     await guardar();
     toast('El archivo estaba dañado: se recuperaron los datos desde la última copia ✓');
+  }
+  // Quedó un formulario a medio llenar de la vez anterior (se cerró el programa sin guardar).
+  if (db.borrador) {
+    const b = db.borrador;
+    const quiere = await confirmar({ titulo: 'Quedó algo sin guardar', texto: `La última vez cerraste el programa con ${b.tipo === 'auto' ? 'un auto' : 'un presupuesto'} a medio llenar${b.draft.patente ? ' (' + b.draft.patente + ')' : ''}. ¿Quieres seguir donde quedaste?`, ok: 'Sí, recuperarlo', cancelar: 'Descartarlo', enfocarOk: true });
+    if (quiere) {
+      reiniciarPatente();
+      ctx = { tipo: b.tipo, draft: b.draft, origen: b.origen || null, dirty: true };
+      if (b.tipo === 'auto') pintarAuto(); else pintarPres();
+    } else {
+      db.borrador = null;
+      await guardar();
+    }
   }
 })();
 
